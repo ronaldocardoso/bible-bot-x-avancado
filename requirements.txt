@@ -1,4 +1,5 @@
 tweepy
 openai
 requests
-fal
+- fal
++ fal-client
