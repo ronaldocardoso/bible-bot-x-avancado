@@ -3,11 +3,14 @@ name: Versículo Diário Católico
 on:
   schedule:
     - cron: '0 10 * * *'   # Todo dia às 7h da manhã (horário de Brasília)
-  workflow_dispatch:       # Permite rodar manualmente para testar
+  workflow_dispatch:
 
 jobs:
   post:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # ← Essa linha resolve o aviso
+
     steps:
       - uses: actions/checkout@v4
       
