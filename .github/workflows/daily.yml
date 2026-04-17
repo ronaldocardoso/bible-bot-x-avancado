@@ -2,14 +2,15 @@ name: Versículo Diário Católico
 
 on:
   schedule:
-    - cron: '0 10 * * *'   # Todo dia às 7h da manhã (horário de Brasília)
+    - cron: '0 10 * * *'
   workflow_dispatch:
 
 jobs:
   post:
     runs-on: ubuntu-latest
     env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # ← Essa linha resolve o aviso
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      PYTHONUNBUFFERED: "1"          # ← ESSA LINHA É A SOLUÇÃO
 
     steps:
       - uses: actions/checkout@v4
@@ -30,4 +31,4 @@ jobs:
           X_ACCESS_SECRET: ${{ secrets.X_ACCESS_SECRET }}
           GROK_API_KEY: ${{ secrets.GROK_API_KEY }}
           FAL_KEY: ${{ secrets.FAL_KEY }}
-        run: python bot.py
+        run: python -u bot.py     # ← MUDEI PARA -u (unbuffered)
