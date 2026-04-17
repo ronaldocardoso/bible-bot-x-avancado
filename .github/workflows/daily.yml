@@ -1,0 +1,30 @@
+name: Versículo Diário Católico
+
+on:
+  schedule:
+    - cron: '0 10 * * *'   # Todo dia às 7h da manhã (horário de Brasília)
+  workflow_dispatch:       # Permite rodar manualmente para testar
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+      
+      - name: Rodar o bot
+        env:
+          X_CONSUMER_KEY: ${{ secrets.X_CONSUMER_KEY }}
+          X_CONSUMER_SECRET: ${{ secrets.X_CONSUMER_SECRET }}
+          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+          X_ACCESS_SECRET: ${{ secrets.X_ACCESS_SECRET }}
+          GROK_API_KEY: ${{ secrets.GROK_API_KEY }}
+          FAL_KEY: ${{ secrets.FAL_KEY }}
+        run: python bot.py
