@@ -1,4 +1,4 @@
 tweepy
 openai
 requests
-fal-client
+fal>=0.1.0
