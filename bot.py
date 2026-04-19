@@ -115,6 +115,28 @@ def publicar_no_x(cliente, texto):
         tweet_id = data.get("id")
         logger.info("✅ Post publicado com sucesso. Tweet ID: %s", tweet_id)
         return resposta
+    except tweepy.errors.Forbidden as e:
+        detalhes = []
+
+        api_errors = getattr(e, "api_errors", None)
+        if api_errors:
+            detalhes.append(f"api_errors={api_errors}")
+
+        api_messages = getattr(e, "api_messages", None)
+        if api_messages:
+            detalhes.append(f"api_messages={api_messages}")
+
+        response = getattr(e, "response", None)
+        if response is not None and getattr(response, "text", None):
+            detalhes.append(f"response={response.text}")
+
+        sufixo = f" | {' | '.join(detalhes)}" if detalhes else ""
+        logger.error(
+            "❌ Erro ao publicar no X: 403 Forbidden. "
+            "Verifique permissao Read and write, regeneracao do Access Token/Secret e restricoes da conta.%s",
+            sufixo,
+        )
+        raise
     except tweepy.TweepyException as e:
         logger.error("❌ Erro ao publicar no X: %s", e)
         raise
