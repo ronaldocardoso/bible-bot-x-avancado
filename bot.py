@@ -57,4 +57,15 @@ def pegar_versiculo():
         data = r.json()
         ref = data["reference"]
         texto = data["text"]
+        return ref, texto
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ Erro ao buscar versículo: {e}")
+        raise
+    except (KeyError, ValueError) as e:
+        logger.error(f"❌ Erro ao processar resposta da API: {e}")
+        raise
 
+
+# Add more functions here as needed
+if __name__ == "__main__":
+    pass
