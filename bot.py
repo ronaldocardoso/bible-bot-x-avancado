@@ -56,4 +56,5 @@ def pegar_versiculo():
         r.raise_for_status()
         data = r.json()
         ref = data["reference"]
-        texto =
+        texto = data["text"]
+
