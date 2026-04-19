@@ -43,6 +43,27 @@ def validar_campo_texto(data: dict[str, Any], campo: str) -> str:
     return " ".join(valor.split())
 
 
+def extrair_referencia_e_texto(data: dict[str, Any]) -> tuple[str, str]:
+    """Aceita tanto payloads antigos quanto o formato atual com `random_verse`."""
+    if "reference" in data and "text" in data:
+        return validar_campo_texto(data, "reference"), validar_campo_texto(data, "text")
+
+    verso = data.get("random_verse")
+    if not isinstance(verso, dict):
+        raise ValueError("Resposta da API sem `reference` e sem objeto `random_verse`")
+
+    livro = validar_campo_texto(verso, "book")
+    texto = validar_campo_texto(verso, "text")
+    capitulo = verso.get("chapter")
+    versiculo = verso.get("verse")
+
+    if not isinstance(capitulo, int) or not isinstance(versiculo, int):
+        raise ValueError("Campos inválidos na resposta da API: chapter/verse")
+
+    referencia = f"{livro} {capitulo}:{versiculo}"
+    return referencia, texto
+
+
 def pegar_versiculo():
     """Pega um versículo aleatório da Bíblia (Almeida)"""
     try:
@@ -52,8 +73,7 @@ def pegar_versiculo():
         if not isinstance(data, dict):
             raise ValueError("Resposta da API não é um objeto JSON válido")
 
-        ref = validar_campo_texto(data, "reference")
-        texto = validar_campo_texto(data, "text")
+        ref, texto = extrair_referencia_e_texto(data)
         return ref, texto
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ Erro ao buscar versículo: {e}")
