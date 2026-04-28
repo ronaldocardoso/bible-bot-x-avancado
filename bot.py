@@ -1,9 +1,13 @@
 import base64
 import logging
 import os
+import re
 import tempfile
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import requests
 import tweepy
@@ -18,14 +22,26 @@ logger = logging.getLogger(__name__)
 
 logger.info("🚀 BOT Palavra do Dia iniciado!")
 
-BIBLE_API_URL = "https://bible-api.com/data/almeida/random"
+BIBLE_RANDOM_API_URL = "https://bible-api.com/data/almeida/random"
+BIBLE_PASSAGE_API_URL = "https://bible-api.com/"
+LITURGICAL_CALENDAR_API_URL = "https://cpbjr.github.io/catholic-readings-api/liturgical-calendar"
+LITURGICAL_READINGS_API_URL = "https://cpbjr.github.io/catholic-readings-api/readings"
 ASSINATURA = "\n\n#Biblia #VersiculoDoDia"
 MAX_TWEET_LEN = 280
+DEFAULT_BOT_TIMEZONE = "America/Sao_Paulo"
 XAI_IMAGE_API_URL = "https://api.x.ai/v1/images/generations"
 XAI_IMAGE_MODEL = "grok-imagine-image"
 XAI_IMAGE_ASPECT_RATIO = "1:1"
 XAI_IMAGE_RESOLUTION = "1k"
 XAI_IMAGE_RESPONSE_FORMAT = "b64_json"
+TIPOS_CELEBRACAO_ESPECIAIS = {"SOLEMNITY", "FEAST", "MEMORIAL", "OPT_MEMORIAL"}
+TIPOS_CELEBRACAO_PT = {
+    "SOLEMNITY": "Solenidade",
+    "FEAST": "Festa",
+    "MEMORIAL": "Memória",
+    "OPT_MEMORIAL": "Memória facultativa",
+    "FERIA": "Dia ferial",
+}
 
 # ====================== FUNÇÕES ======================
 def ler_env(nome: str, default: Optional[str] = None) -> Optional[str]:
@@ -48,6 +64,7 @@ def carregar_variaveis():
         "XAI_IMAGE_MODEL": ler_env("XAI_IMAGE_MODEL", XAI_IMAGE_MODEL),
         "XAI_IMAGE_ASPECT_RATIO": ler_env("XAI_IMAGE_ASPECT_RATIO", XAI_IMAGE_ASPECT_RATIO),
         "XAI_IMAGE_RESOLUTION": ler_env("XAI_IMAGE_RESOLUTION", XAI_IMAGE_RESOLUTION),
+        "BOT_TIMEZONE": ler_env("BOT_TIMEZONE", DEFAULT_BOT_TIMEZONE),
     }
 
     obrigatorias_x = (
@@ -94,7 +111,7 @@ def extrair_referencia_e_texto(data: dict[str, Any]) -> tuple[str, str]:
 def pegar_versiculo():
     """Pega um versículo aleatório da Bíblia (Almeida)"""
     try:
-        r = requests.get(BIBLE_API_URL, timeout=30)
+        r = requests.get(BIBLE_RANDOM_API_URL, timeout=30)
         r.raise_for_status()
         data = r.json()
         if not isinstance(data, dict):
@@ -110,14 +127,167 @@ def pegar_versiculo():
         raise
 
 
-def montar_texto_postagem(referencia, versiculo):
-    base = f"📖 Palavra do dia\n\n{referencia}\n{versiculo}"
+def obter_data_postagem(config: dict[str, Optional[str]]) -> date:
+    timezone_nome = config.get("BOT_TIMEZONE") or DEFAULT_BOT_TIMEZONE
+    try:
+        return datetime.now(ZoneInfo(timezone_nome)).date()
+    except Exception as e:
+        logger.warning(
+            "⚠️ Fuso horário inválido em BOT_TIMEZONE (%s). Usando %s. Detalhe: %s",
+            timezone_nome,
+            DEFAULT_BOT_TIMEZONE,
+            e,
+        )
+        return datetime.now(ZoneInfo(DEFAULT_BOT_TIMEZONE)).date()
+
+
+def montar_url_endpoint(base_url: str, data_ref: date) -> str:
+    return f"{base_url}/{data_ref.year}/{data_ref:%m-%d}.json"
+
+
+def buscar_json(url: str) -> dict[str, Any]:
+    resposta = requests.get(url, timeout=30)
+    resposta.raise_for_status()
+    data = resposta.json()
+    if not isinstance(data, dict):
+        raise ValueError(f"Resposta JSON inválida para {url}")
+    return data
+
+
+def normalizar_referencia_biblica(referencia: str) -> str:
+    referencia = referencia.split("|", 1)[0].strip()
+    referencia = re.sub(r"(?<=\d)([a-z]+)\b", "", referencia, flags=re.IGNORECASE)
+    referencia = " ".join(referencia.split())
+    return referencia
+
+
+def pegar_passagem(referencia: str) -> tuple[str, str]:
+    referencia_normalizada = normalizar_referencia_biblica(referencia)
+    url = f"{BIBLE_PASSAGE_API_URL}{quote(referencia_normalizada)}?translation=almeida"
+
+    try:
+        r = requests.get(url, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        if not isinstance(data, dict):
+            raise ValueError("Resposta da API bíblica não é um objeto JSON válido")
+
+        ref, texto = extrair_referencia_e_texto(data)
+        return ref, texto
+    except requests.exceptions.RequestException as e:
+        logger.error("❌ Erro ao buscar passagem bíblica (%s): %s", referencia_normalizada, e)
+        raise
+    except ValueError as e:
+        logger.error("❌ Erro ao processar passagem bíblica (%s): %s", referencia_normalizada, e)
+        raise
+
+
+def traduzir_tipo_celebracao(tipo: str) -> str:
+    return TIPOS_CELEBRACAO_PT.get(tipo, tipo)
+
+
+def pegar_tema_liturgico(data_ref: date) -> Optional[dict[str, str]]:
+    url = montar_url_endpoint(LITURGICAL_CALENDAR_API_URL, data_ref)
+    try:
+        data = buscar_json(url)
+    except Exception as e:
+        logger.warning("⚠️ Não foi possível consultar o calendário católico (%s): %s", data_ref.isoformat(), e)
+        return None
+
+    celebracao = data.get("celebration")
+    if not isinstance(celebracao, dict):
+        return None
+
+    tipo = celebracao.get("type")
+    nome = celebracao.get("name")
+    if not isinstance(tipo, str) or not isinstance(nome, str) or not nome.strip():
+        return None
+
+    if tipo not in TIPOS_CELEBRACAO_ESPECIAIS:
+        logger.info("ℹ️ Dia litúrgico sem celebração especial (%s)", tipo)
+        return None
+
+    tema = {
+        "date": data_ref.isoformat(),
+        "season": str(data.get("season", "")).strip(),
+        "name": " ".join(nome.split()),
+        "type": tipo,
+        "type_pt": traduzir_tipo_celebracao(tipo),
+        "description": " ".join(str(celebracao.get("description", "")).split()),
+        "quote": " ".join(str(celebracao.get("quote", "")).split()),
+    }
+    logger.info("✝️ Tema litúrgico detectado: %s (%s)", tema["name"], tema["type_pt"])
+    return tema
+
+
+def escolher_referencia_liturgica(readings: dict[str, Any]) -> Optional[str]:
+    for chave in ("gospel", "firstReading", "secondReading", "psalm"):
+        valor = readings.get(chave)
+        if isinstance(valor, str) and valor.strip():
+            return valor
+    return None
+
+
+def pegar_versiculo_liturgico(data_ref: date) -> Optional[tuple[str, str]]:
+    url = montar_url_endpoint(LITURGICAL_READINGS_API_URL, data_ref)
+    try:
+        data = buscar_json(url)
+    except Exception as e:
+        logger.warning("⚠️ Não foi possível consultar as leituras católicas (%s): %s", data_ref.isoformat(), e)
+        return None
+
+    readings = data.get("readings")
+    if not isinstance(readings, dict):
+        return None
+
+    referencia = escolher_referencia_liturgica(readings)
+    if not referencia:
+        return None
+
+    try:
+        return pegar_passagem(referencia)
+    except Exception as e:
+        logger.warning("⚠️ Não foi possível usar a leitura litúrgica do dia (%s): %s", referencia, e)
+        return None
+
+
+def preparar_conteudo_postagem(config: dict[str, Optional[str]]) -> tuple[Optional[dict[str, str]], str, str]:
+    data_postagem = obter_data_postagem(config)
+    logger.info("🗓️ Data da postagem considerada para o calendário católico: %s", data_postagem.isoformat())
+
+    tema = pegar_tema_liturgico(data_postagem)
+    if tema:
+        versiculo_liturgico = pegar_versiculo_liturgico(data_postagem)
+        if versiculo_liturgico:
+            return tema, versiculo_liturgico[0], versiculo_liturgico[1]
+
+        logger.warning("⚠️ O tema litúrgico será mantido, mas o versículo cairá para o modo aleatório.")
+
+    referencia, versiculo = pegar_versiculo()
+    return tema, referencia, versiculo
+
+
+def resumir_texto(texto: str, limite: int) -> str:
+    if len(texto) <= limite:
+        return texto
+
+    return texto[: max(limite - 3, 0)].rstrip(" .,;:!?") + "..."
+
+
+def montar_texto_postagem(referencia, versiculo, tema: Optional[dict[str, str]] = None):
+    prefixo = "📖 Palavra do dia\n\n"
+    if tema:
+        tema_resumido = resumir_texto(tema["name"], 85)
+        prefixo += f"Tema: {tema_resumido} ({tema['type_pt']})\n\n"
+
+    prefixo += f"{referencia}\n"
+    base = prefixo + versiculo
     limite = MAX_TWEET_LEN - len(ASSINATURA)
 
     if len(base) > limite:
-        texto_maximo = max(limite - len(f"📖 Palavra do dia\n\n{referencia}\n") - 3, 0)
+        texto_maximo = max(limite - len(prefixo) - 3, 0)
         versiculo = versiculo[:texto_maximo].rstrip(" .,;:!?") + "..."
-        base = f"📖 Palavra do dia\n\n{referencia}\n{versiculo}"
+        base = prefixo + versiculo
 
     postagem = base + ASSINATURA
     if len(postagem) > MAX_TWEET_LEN:
@@ -126,22 +296,43 @@ def montar_texto_postagem(referencia, versiculo):
     return postagem
 
 
-def montar_prompt_imagem(referencia: str, versiculo: str) -> str:
+def montar_prompt_imagem(referencia: str, versiculo: str, tema: Optional[dict[str, str]] = None) -> str:
+    contexto_liturgico = ""
+    if tema:
+        partes = [
+            f"Tema litúrgico do dia: {tema['name']}.",
+            f"Tipo de celebração: {tema['type_pt']}.",
+        ]
+        if tema.get("season"):
+            partes.append(f"Tempo litúrgico: {tema['season']}.")
+        if tema.get("description"):
+            partes.append(f"Contexto: {tema['description']}.")
+        if tema.get("quote"):
+            partes.append(f"Inspiração adicional: {tema['quote']}.")
+        contexto_liturgico = " ".join(partes) + " "
+
     return (
         "Crie uma ilustração cristã reverente, inspiradora e apropriada para uma postagem no X, "
-        "baseada no significado espiritual do versículo abaixo. Prefira uma representação simbólica "
-        "ou uma cena contemplativa, com luz suave, composição elegante e atmosfera de esperança. "
+        "baseada no significado espiritual do versículo abaixo. "
+        f"{contexto_liturgico}"
+        "Prefira uma representação simbólica ou uma cena contemplativa, com luz suave, composição elegante "
+        "e atmosfera de esperança. "
         "Nao inclua letras, palavras, versículos escritos, marcas d'agua, molduras ou assinaturas. "
         f"Referência bíblica: {referencia}. "
         f"Versículo: {versiculo}"
     )
 
 
-def montar_alt_texto(referencia: str, versiculo: str) -> str:
-    texto_base = (
-        f"Ilustração inspirada no versículo {referencia}, com tema de fé, esperança e contemplação. "
-        f"Versículo-base: {versiculo}"
-    )
+def montar_alt_texto(referencia: str, versiculo: str, tema: Optional[dict[str, str]] = None) -> str:
+    partes = []
+    if tema:
+        partes.append(f"Ilustração inspirada na celebração católica do dia: {tema['name']}.")
+    else:
+        partes.append("Ilustração inspirada em um versículo bíblico.")
+
+    partes.append(f"Referência: {referencia}.")
+    partes.append(f"Versículo-base: {versiculo}")
+    texto_base = " ".join(partes)
     return texto_base[:1000]
 
 
@@ -175,11 +366,16 @@ def criar_clientes_x(config):
     return client_v2, api_v1
 
 
-def gerar_imagem_post(config: dict[str, Optional[str]], referencia: str, versiculo: str) -> Path:
+def gerar_imagem_post(
+    config: dict[str, Optional[str]],
+    referencia: str,
+    versiculo: str,
+    tema: Optional[dict[str, str]] = None,
+) -> Path:
     if not config.get("XAI_API_KEY"):
         raise RuntimeError("XAI_API_KEY não configurada")
 
-    prompt = montar_prompt_imagem(referencia, versiculo)
+    prompt = montar_prompt_imagem(referencia, versiculo, tema=tema)
     payload = {
         "model": config["XAI_IMAGE_MODEL"],
         "prompt": prompt,
@@ -302,10 +498,10 @@ def main():
         config = carregar_variaveis()
         logger.info("✅ Variáveis carregadas com sucesso")
 
-        referencia, versiculo = pegar_versiculo()
-        logger.info("✅ Versículo carregado: %s", referencia)
+        tema, referencia, versiculo = preparar_conteudo_postagem(config)
+        logger.info("✅ Conteúdo carregado: %s", referencia)
 
-        texto = montar_texto_postagem(referencia, versiculo)
+        texto = montar_texto_postagem(referencia, versiculo, tema=tema)
         logger.info("📝 Texto pronto para postagem (%s caracteres)", len(texto))
 
         cliente_x, api_x_v1 = criar_clientes_x(config)
@@ -313,11 +509,11 @@ def main():
 
         if config.get("XAI_API_KEY"):
             try:
-                caminho_imagem = gerar_imagem_post(config, referencia, versiculo)
+                caminho_imagem = gerar_imagem_post(config, referencia, versiculo, tema=tema)
                 media_id = upload_imagem_no_x(
                     api_x_v1,
                     caminho_imagem,
-                    montar_alt_texto(referencia, versiculo),
+                    montar_alt_texto(referencia, versiculo, tema=tema),
                 )
             except Exception as e:
                 logger.exception("⚠️ Não foi possível gerar/anexar a imagem. O bot seguirá com texto apenas: %s", e)

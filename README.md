@@ -6,10 +6,12 @@ Bot simples para publicar um versículo aleatório da Bíblia no X uma vez por d
 
 O fluxo faz isto:
 
-1. busca um versículo aleatório na API `bible-api.com`
-2. monta um texto curto para postagem
-3. gera uma imagem inspirada no versículo com a xAI
-4. publica no X usando OAuth 1.0a
+1. consulta o calendário litúrgico católico do dia
+2. se houver uma celebração especial (`solenidade`, `festa`, `memória` ou `memória facultativa`), usa o tema do dia e tenta priorizar a leitura litúrgica correspondente
+3. se o dia for ferial ou alguma consulta falhar, volta ao modo normal com versículo aleatório da API `bible-api.com`
+4. monta um texto curto para postagem
+5. gera uma imagem inspirada no versículo e, quando aplicável, no tema litúrgico do dia
+6. publica no X usando OAuth 1.0a
 
 ## Secrets necessários no GitHub
 
@@ -44,6 +46,7 @@ Você pode configurar estas `Repository variables` no GitHub para ajustar a imag
 - `XAI_IMAGE_MODEL` (padrão: `grok-imagine-image`)
 - `XAI_IMAGE_ASPECT_RATIO` (padrão: `1:1`)
 - `XAI_IMAGE_RESOLUTION` (padrão: `1k`)
+- `BOT_TIMEZONE` (padrão: `America/Sao_Paulo`)
 
 ## Execução local
 
@@ -76,5 +79,6 @@ O agendamento está em [`.github/workflows/daily.yml`](/Users/ronaldodallevedove
 ## Limitações atuais
 
 - depende da disponibilidade da API pública de versículos
+- depende também da disponibilidade das APIs públicas de calendário/leituras católicas
 - a qualidade visual depende do prompt e do modelo configurado
 - não possui testes automatizados
