@@ -13,7 +13,8 @@ O fluxo faz isto:
 5. se o dia for ferial ou alguma consulta falhar, volta ao modo normal com versículo aleatório da API `bible-api.com`
 6. monta um texto curto para postagem
 7. gera uma imagem inspirada no versículo e, quando aplicável, no tema litúrgico do dia
-8. publica no X usando OAuth 1.0a
+8. aplica de forma discreta a assinatura `@PalavraDoDiaBR` na própria imagem
+9. publica no X usando OAuth 1.0a
 
 ## Secrets necessários no GitHub
 
@@ -50,6 +51,10 @@ Você pode configurar estas `Repository variables` no GitHub para ajustar a imag
 - `XAI_IMAGE_RESOLUTION` (padrão: `1k`)
 - `BOT_TIMEZONE` (padrão: `America/Sao_Paulo`)
 - `DIOCESAN_CALENDAR_FILE` (padrão: `diocesan_calendar.json`)
+
+## Assinatura na imagem
+
+Toda imagem gerada recebe automaticamente uma assinatura discreta com `@PalavraDoDiaBR` no canto inferior direito antes do upload para o X.
 
 ## Calendário diocesano
 

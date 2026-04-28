@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 import tweepy
+from PIL import Image, ImageDraw, ImageFont
 
 # ====================== CONFIGURAÇÃO DE LOG ======================
 logging.basicConfig(
@@ -36,6 +37,7 @@ XAI_IMAGE_MODEL = "grok-imagine-image"
 XAI_IMAGE_ASPECT_RATIO = "1:1"
 XAI_IMAGE_RESOLUTION = "1k"
 XAI_IMAGE_RESPONSE_FORMAT = "b64_json"
+IMAGE_SIGNATURE_TEXT = "@PalavraDoDiaBR"
 TIPOS_CELEBRACAO_ESPECIAIS = {"SOLEMNITY", "FEAST", "MEMORIAL", "OPT_MEMORIAL"}
 TIPOS_CELEBRACAO_PT = {
     "SOLEMNITY": "Solenidade",
@@ -605,6 +607,52 @@ def detectar_extensao_imagem(conteudo: bytes) -> str:
     return ".jpg"
 
 
+def carregar_fonte_assinatura(tamanho: int) -> ImageFont.ImageFont:
+    try:
+        return ImageFont.truetype("DejaVuSans.ttf", tamanho)
+    except OSError:
+        return ImageFont.load_default()
+
+
+def assinar_imagem(caminho_imagem: Path, assinatura: str = IMAGE_SIGNATURE_TEXT) -> None:
+    with Image.open(caminho_imagem) as imagem_original:
+        imagem = imagem_original.convert("RGBA")
+
+        largura, altura = imagem.size
+        tamanho_fonte = max(18, min(largura, altura) // 28)
+        margem = max(18, min(largura, altura) // 30)
+        padding_x = max(10, tamanho_fonte // 2)
+        padding_y = max(6, tamanho_fonte // 3)
+
+        fonte = carregar_fonte_assinatura(tamanho_fonte)
+        overlay = Image.new("RGBA", imagem.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        caixa_texto = draw.textbbox((0, 0), assinatura, font=fonte)
+        largura_texto = caixa_texto[2] - caixa_texto[0]
+        altura_texto = caixa_texto[3] - caixa_texto[1]
+
+        x_texto = largura - largura_texto - margem - padding_x
+        y_texto = altura - altura_texto - margem - padding_y
+        caixa_fundo = (
+            x_texto - padding_x,
+            y_texto - padding_y,
+            x_texto + largura_texto + padding_x,
+            y_texto + altura_texto + padding_y,
+        )
+
+        draw.rounded_rectangle(caixa_fundo, radius=max(8, tamanho_fonte // 3), fill=(0, 0, 0, 90))
+        draw.text((x_texto, y_texto), assinatura, font=fonte, fill=(255, 255, 255, 185))
+
+        imagem_assinada = Image.alpha_composite(imagem, overlay)
+        formato = imagem_original.format or "PNG"
+        if formato.upper() in {"JPEG", "JPG"}:
+            imagem_assinada = imagem_assinada.convert("RGB")
+
+        imagem_assinada.save(caminho_imagem, format=formato)
+
+    logger.info("✍️ Assinatura aplicada na imagem: %s", assinatura)
+
+
 def criar_clientes_x(config):
     auth = tweepy.OAuth1UserHandler(
         config["X_CONSUMER_KEY"],
@@ -684,6 +732,7 @@ def gerar_imagem_post(
         arquivo.write(conteudo)
         caminho = Path(arquivo.name)
 
+    assinar_imagem(caminho)
     logger.info("🖼️ Imagem gerada com sucesso via xAI em %s", caminho)
     return caminho
 
