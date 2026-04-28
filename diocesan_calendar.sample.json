@@ -1,0 +1,13 @@
+{
+  "diocese": "Diocese de Exemplo",
+  "celebrations": [
+    {
+      "month_day": "10-07",
+      "name": "Nossa Senhora do Rosário",
+      "type": "SOLEMNITY",
+      "description": "Padroeira da diocese.",
+      "quote": "",
+      "reference": "Lucas 1:26-38"
+    }
+  ]
+}

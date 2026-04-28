@@ -34,4 +34,5 @@ jobs:
           XAI_IMAGE_ASPECT_RATIO: ${{ vars.XAI_IMAGE_ASPECT_RATIO }}
           XAI_IMAGE_RESOLUTION: ${{ vars.XAI_IMAGE_RESOLUTION }}
           BOT_TIMEZONE: ${{ vars.BOT_TIMEZONE }}
+          DIOCESAN_CALENDAR_FILE: ${{ vars.DIOCESAN_CALENDAR_FILE }}
         run: python -u bot.py

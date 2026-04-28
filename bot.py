@@ -1,4 +1,5 @@
 import base64
+import json
 import logging
 import os
 import re
@@ -26,6 +27,7 @@ BIBLE_RANDOM_API_URL = "https://bible-api.com/data/almeida/random"
 BIBLE_PASSAGE_API_URL = "https://bible-api.com/"
 LITURGICAL_CALENDAR_API_URL = "https://cpbjr.github.io/catholic-readings-api/liturgical-calendar"
 LITURGICAL_READINGS_API_URL = "https://cpbjr.github.io/catholic-readings-api/readings"
+BRAZIL_LITURGICAL_ICS_URL_TEMPLATE = "https://gcatholic.org/calendar/ics/{year}-pt-BR.ics?v=3"
 ASSINATURA = "\n\n#Biblia #VersiculoDoDia"
 MAX_TWEET_LEN = 280
 DEFAULT_BOT_TIMEZONE = "America/Sao_Paulo"
@@ -41,7 +43,13 @@ TIPOS_CELEBRACAO_PT = {
     "MEMORIAL": "Memória",
     "OPT_MEMORIAL": "Memória facultativa",
     "FERIA": "Dia ferial",
+    "SUNDAY": "Domingo",
+    "LITURGICAL_DAY": "Dia litúrgico",
 }
+SOURCE_BRAZIL_NATIONAL = "BRAZIL_NATIONAL"
+SOURCE_DIOCESAN = "DIOCESAN"
+SOURCE_GLOBAL_FALLBACK = "GLOBAL_FALLBACK"
+ARQUIVO_CALENDARIO_DIOCESANO_PADRAO = "diocesan_calendar.json"
 
 # ====================== FUNÇÕES ======================
 def ler_env(nome: str, default: Optional[str] = None) -> Optional[str]:
@@ -65,6 +73,7 @@ def carregar_variaveis():
         "XAI_IMAGE_ASPECT_RATIO": ler_env("XAI_IMAGE_ASPECT_RATIO", XAI_IMAGE_ASPECT_RATIO),
         "XAI_IMAGE_RESOLUTION": ler_env("XAI_IMAGE_RESOLUTION", XAI_IMAGE_RESOLUTION),
         "BOT_TIMEZONE": ler_env("BOT_TIMEZONE", DEFAULT_BOT_TIMEZONE),
+        "DIOCESAN_CALENDAR_FILE": ler_env("DIOCESAN_CALENDAR_FILE", ARQUIVO_CALENDARIO_DIOCESANO_PADRAO),
     }
 
     obrigatorias_x = (
@@ -186,7 +195,7 @@ def traduzir_tipo_celebracao(tipo: str) -> str:
     return TIPOS_CELEBRACAO_PT.get(tipo, tipo)
 
 
-def pegar_tema_liturgico(data_ref: date) -> Optional[dict[str, str]]:
+def pegar_tema_liturgico_padrao(data_ref: date) -> Optional[dict[str, str]]:
     url = montar_url_endpoint(LITURGICAL_CALENDAR_API_URL, data_ref)
     try:
         data = buscar_json(url)
@@ -215,9 +224,245 @@ def pegar_tema_liturgico(data_ref: date) -> Optional[dict[str, str]]:
         "type_pt": traduzir_tipo_celebracao(tipo),
         "description": " ".join(str(celebracao.get("description", "")).split()),
         "quote": " ".join(str(celebracao.get("quote", "")).split()),
+        "source": SOURCE_GLOBAL_FALLBACK,
     }
     logger.info("✝️ Tema litúrgico detectado: %s (%s)", tema["name"], tema["type_pt"])
     return tema
+
+
+def desenrolar_linhas_ics(texto: str) -> list[str]:
+    linhas: list[str] = []
+    for linha in texto.splitlines():
+        if linha.startswith((" ", "\t")) and linhas:
+            linhas[-1] += linha[1:]
+        else:
+            linhas.append(linha)
+    return linhas
+
+
+def parsear_eventos_ics(texto: str) -> list[dict[str, str]]:
+    eventos: list[dict[str, str]] = []
+    evento_atual: Optional[dict[str, str]] = None
+
+    for linha in desenrolar_linhas_ics(texto):
+        if linha == "BEGIN:VEVENT":
+            evento_atual = {}
+            continue
+
+        if linha == "END:VEVENT":
+            if evento_atual:
+                eventos.append(evento_atual)
+            evento_atual = None
+            continue
+
+        if evento_atual is None or ":" not in linha:
+            continue
+
+        chave, valor = linha.split(":", 1)
+        evento_atual[chave] = valor
+
+    return eventos
+
+
+def desescapar_ics(texto: str) -> str:
+    return (
+        texto.replace("\\n", "\n")
+        .replace("\\,", ",")
+        .replace("\\;", ";")
+        .replace("\\\\", "\\")
+    )
+
+
+def parsear_resumo_gcatholic(resumo: str) -> tuple[Optional[str], str]:
+    resumo_limpo = desescapar_ics(resumo).strip()
+    match = re.match(r"^\S+\s(?:\[(?P<grau>[SFMm])\]\s)?(?P<nome>.+)$", resumo_limpo)
+    if not match:
+        return None, resumo_limpo
+
+    grau = match.group("grau")
+    nome = " ".join(match.group("nome").split())
+    return grau, nome
+
+
+def extrair_descricao_gcatholic(descricao: str) -> str:
+    primeira_linha = desescapar_ics(descricao).split("\n", 1)[0].strip()
+    primeira_linha = primeira_linha.strip("() ")
+    return " ".join(primeira_linha.split())
+
+
+def nome_ferial_generico(nome: str) -> bool:
+    if nome == "Nossa Senhora no Sábado":
+        return True
+
+    return bool(
+        re.match(
+            r"^(Segunda-Feira|Terça-Feira|Quarta-Feira|Quinta-Feira|Sexta-Feira|Sábado)\b",
+            nome,
+        )
+    )
+
+
+def tipo_por_resumo_gcatholic(grau: Optional[str], nome: str) -> Optional[str]:
+    if grau == "S":
+        return "SOLEMNITY"
+    if grau == "F":
+        return "FEAST"
+    if grau == "M":
+        return "MEMORIAL"
+    if grau == "m":
+        return "OPT_MEMORIAL"
+    if nome.startswith("Domingo"):
+        return "SUNDAY"
+    if nome_ferial_generico(nome):
+        return None
+    return "LITURGICAL_DAY"
+
+
+def pontuar_tema_gcatholic(tipo: Optional[str]) -> int:
+    prioridades = {
+        "SOLEMNITY": 500,
+        "FEAST": 400,
+        "SUNDAY": 350,
+        "MEMORIAL": 300,
+        "OPT_MEMORIAL": 200,
+        "LITURGICAL_DAY": 100,
+    }
+    return prioridades.get(tipo or "", 0)
+
+
+def carregar_eventos_calendario_brasileiro(ano: int) -> dict[str, list[dict[str, str]]]:
+    url = BRAZIL_LITURGICAL_ICS_URL_TEMPLATE.format(year=ano)
+    resposta = requests.get(url, timeout=45)
+    resposta.raise_for_status()
+    texto_ics = resposta.content.decode("utf-8", errors="replace")
+
+    eventos_por_data: dict[str, list[dict[str, str]]] = {}
+    for evento in parsear_eventos_ics(texto_ics):
+        data_bruta = evento.get("DTSTART;VALUE=DATE")
+        resumo = evento.get("SUMMARY")
+        if not data_bruta or not resumo:
+            continue
+
+        if not re.match(r"^\d{8}$", data_bruta):
+            continue
+
+        data_iso = f"{data_bruta[0:4]}-{data_bruta[4:6]}-{data_bruta[6:8]}"
+        grau, nome = parsear_resumo_gcatholic(resumo)
+        tipo = tipo_por_resumo_gcatholic(grau, nome)
+        descricao = extrair_descricao_gcatholic(evento.get("DESCRIPTION", ""))
+        eventos_por_data.setdefault(data_iso, []).append(
+            {
+                "name": nome,
+                "type": tipo or "FERIA",
+                "type_pt": traduzir_tipo_celebracao(tipo or "FERIA"),
+                "description": descricao,
+                "quote": "",
+                "source": SOURCE_BRAZIL_NATIONAL,
+                "priority": str(pontuar_tema_gcatholic(tipo)),
+            }
+        )
+
+    return eventos_por_data
+
+
+def escolher_melhor_evento(eventos: list[dict[str, str]]) -> Optional[dict[str, str]]:
+    if not eventos:
+        return None
+
+    melhor = max(eventos, key=lambda item: int(item.get("priority", "0")))
+    if int(melhor.get("priority", "0")) <= 0:
+        return None
+    return melhor
+
+
+def consultar_tema_liturgico_brasil(data_ref: date) -> tuple[Optional[dict[str, str]], bool]:
+    try:
+        eventos_por_data = carregar_eventos_calendario_brasileiro(data_ref.year)
+    except Exception as e:
+        logger.warning("⚠️ Não foi possível consultar o calendário católico brasileiro (%s): %s", data_ref.year, e)
+        return None, False
+
+    melhor = escolher_melhor_evento(eventos_por_data.get(data_ref.isoformat(), []))
+    if not melhor:
+        logger.info("ℹ️ Dia litúrgico brasileiro sem tema especial em %s", data_ref.isoformat())
+        return None, True
+
+    tema = dict(melhor)
+    tema["date"] = data_ref.isoformat()
+    logger.info("🇧🇷 Tema litúrgico brasileiro detectado: %s (%s)", tema["name"], tema["type_pt"])
+    return tema, True
+
+
+def carregar_calendario_diocesano(config: dict[str, Optional[str]]) -> dict[str, Any]:
+    caminho = config.get("DIOCESAN_CALENDAR_FILE")
+    if not caminho:
+        return {}
+
+    arquivo = Path(caminho)
+    if not arquivo.exists():
+        return {}
+
+    try:
+        data = json.loads(arquivo.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning("⚠️ Não foi possível ler o calendário diocesano em %s: %s", arquivo, e)
+        return {}
+
+    return data if isinstance(data, dict) else {}
+
+
+def pegar_tema_liturgico_diocesano(config: dict[str, Optional[str]], data_ref: date) -> Optional[dict[str, str]]:
+    calendario = carregar_calendario_diocesano(config)
+    celebracoes = calendario.get("celebrations")
+    if not isinstance(celebracoes, list):
+        return None
+
+    alvo_iso = data_ref.isoformat()
+    alvo_mes_dia = data_ref.strftime("%m-%d")
+    diocese = " ".join(str(calendario.get("diocese", "")).split())
+
+    for item in celebracoes:
+        if not isinstance(item, dict):
+            continue
+
+        data_item = str(item.get("date", "")).strip()
+        mes_dia = str(item.get("month_day", "")).strip()
+        if data_item != alvo_iso and mes_dia != alvo_mes_dia:
+            continue
+
+        nome = " ".join(str(item.get("name", "")).split())
+        if not nome:
+            continue
+
+        tipo = str(item.get("type", "SOLEMNITY")).strip() or "SOLEMNITY"
+        tema = {
+            "date": alvo_iso,
+            "season": "",
+            "name": nome,
+            "type": tipo,
+            "type_pt": traduzir_tipo_celebracao(tipo),
+            "description": " ".join(str(item.get("description", "")).split()),
+            "quote": " ".join(str(item.get("quote", "")).split()),
+            "source": SOURCE_DIOCESAN,
+            "diocese": diocese,
+            "reference": " ".join(str(item.get("reference", "")).split()),
+        }
+        logger.info("⛪ Tema litúrgico diocesano detectado: %s (%s)", tema["name"], diocese or "diocese local")
+        return tema
+
+    return None
+
+
+def resolver_tema_liturgico(config: dict[str, Optional[str]], data_ref: date) -> Optional[dict[str, str]]:
+    tema_diocesano = pegar_tema_liturgico_diocesano(config, data_ref)
+    if tema_diocesano:
+        return tema_diocesano
+
+    tema_brasil, consultado_brasil = consultar_tema_liturgico_brasil(data_ref)
+    if consultado_brasil:
+        return tema_brasil
+
+    return pegar_tema_liturgico_padrao(data_ref)
 
 
 def escolher_referencia_liturgica(readings: dict[str, Any]) -> Optional[str]:
@@ -255,8 +500,15 @@ def preparar_conteudo_postagem(config: dict[str, Optional[str]]) -> tuple[Option
     data_postagem = obter_data_postagem(config)
     logger.info("🗓️ Data da postagem considerada para o calendário católico: %s", data_postagem.isoformat())
 
-    tema = pegar_tema_liturgico(data_postagem)
-    if tema:
+    tema = resolver_tema_liturgico(config, data_postagem)
+    if tema and tema.get("source") == SOURCE_DIOCESAN and tema.get("reference"):
+        try:
+            referencia, versiculo = pegar_passagem(tema["reference"])
+            return tema, referencia, versiculo
+        except Exception as e:
+            logger.warning("⚠️ Não foi possível usar a referência bíblica diocesana configurada: %s", e)
+
+    if tema and tema.get("source") == SOURCE_GLOBAL_FALLBACK:
         versiculo_liturgico = pegar_versiculo_liturgico(data_postagem)
         if versiculo_liturgico:
             return tema, versiculo_liturgico[0], versiculo_liturgico[1]
@@ -303,6 +555,8 @@ def montar_prompt_imagem(referencia: str, versiculo: str, tema: Optional[dict[st
             f"Tema litúrgico do dia: {tema['name']}.",
             f"Tipo de celebração: {tema['type_pt']}.",
         ]
+        if tema.get("diocese"):
+            partes.append(f"Contexto diocesano: {tema['diocese']}.")
         if tema.get("season"):
             partes.append(f"Tempo litúrgico: {tema['season']}.")
         if tema.get("description"):
@@ -327,6 +581,8 @@ def montar_alt_texto(referencia: str, versiculo: str, tema: Optional[dict[str, s
     partes = []
     if tema:
         partes.append(f"Ilustração inspirada na celebração católica do dia: {tema['name']}.")
+        if tema.get("diocese"):
+            partes.append(f"Referência local: {tema['diocese']}.")
     else:
         partes.append("Ilustração inspirada em um versículo bíblico.")
 
